@@ -3,7 +3,13 @@
     "allow": [
       "Bash(python -c \"import sys; print\\(sys.version\\)\")",
       "Bash(python -c ' *)",
-      "Bash(PYTHONIOENCODING=utf-8 python -m nba_playoff_predictor.main --quick)"
+      "Bash(PYTHONIOENCODING=utf-8 python -m nba_playoff_predictor.main --quick)",
+      "Bash(xargs grep *)",
+      "Read(//c/tmp/**)",
+      "Bash(python -c \"import sys; print\\(sys.executable\\); print\\(sys.version\\)\")",
+      "Bash(c:/Users/Ferhat/Documents/GitHub/nba-playoffs/nba/Scripts/python.exe -c ' *)",
+      "Bash(c:/Users/Ferhat/Documents/GitHub/nba-playoffs/nba/Scripts/python.exe -m pytest tests/test_playoff_picture.py -v)",
+      "Bash(c:/Users/Ferhat/Documents/GitHub/nba-playoffs/nba/Scripts/python.exe -m nba_playoff_predictor.main --quick --refresh-cache --quiet)"
     ]
   }
 }

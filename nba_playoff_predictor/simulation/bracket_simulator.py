@@ -91,10 +91,11 @@ def _simulate_batch(payload: Dict[str, Any]) -> Dict[str, Dict[str, int]]:
     for _ in range(n_sims):
         conf_winners: Dict[str, str] = {}
 
+        round1_pairs_cfg = payload.get("round1_pairs") or {}
         for conf in ("East", "West"):
             s = seed_map[conf]
-            # Round 1 matchups: (1,8) (4,5) (3,6) (2,7)
-            r1_pairs = [(s[1], s[8]), (s[4], s[5]), (s[3], s[6]), (s[2], s[7])]
+            pair_seeds = round1_pairs_cfg.get(conf) or [(1, 8), (4, 5), (3, 6), (2, 7)]
+            r1_pairs = [(s[hi], s[lo]) for hi, lo in pair_seeds]
             r1_winners = [
                 _simulate_series(h, l, prob_matrix, rng, high_has_home_court=True)
                 for h, l in r1_pairs
@@ -156,6 +157,9 @@ class BracketSpec:
     team_id_to_name: Dict[str, str]
     seeds_by_team: Dict[str, int]  # team_id -> seed (1..8), independent of conference
     conference_by_team: Dict[str, str]
+    # Authoritative first-round seed pairings (from PlayoffPicture); falls back
+    # to the canonical (1,8)(4,5)(3,6)(2,7) structure when unavailable.
+    round1_pairs: Optional[Dict[str, List[Tuple[int, int]]]] = None
 
 
 class PlayoffSimulator:
@@ -219,6 +223,7 @@ class PlayoffSimulator:
                 "prob_matrix": self._prob_matrix,
                 "seed_map": self.bracket_spec.seed_map,
                 "seeds_by_team": self.bracket_spec.seeds_by_team,
+                "round1_pairs": self.bracket_spec.round1_pairs,
             }
             for i in range(n_workers)
         ]
@@ -301,8 +306,12 @@ class PlayoffSimulator:
         #
         #   West R1     West R2    West CF     West F     Champion   East F   East CF   East R2   East R1
 
-        east_order = [1, 8, 4, 5, 3, 6, 2, 7]
-        west_order = [1, 8, 4, 5, 3, 6, 2, 7]
+        default_pairs: List[Tuple[int, int]] = [(1, 8), (4, 5), (3, 6), (2, 7)]
+        spec_pairs = spec.round1_pairs or {}
+        east_r1_pairs = spec_pairs.get("East") or default_pairs
+        west_r1_pairs = spec_pairs.get("West") or default_pairs
+        east_order = [seed for pair in east_r1_pairs for seed in pair]
+        west_order = [seed for pair in west_r1_pairs for seed in pair]
 
         # X positions for bracket rounds.
         X_WEST = {"R1": -4, "R2": -3, "CF": -2, "F": -1}
@@ -340,7 +349,12 @@ class PlayoffSimulator:
             edge_x.extend([x0, x1, None])
             edge_y.extend([y0, y1, None])
 
-        def render_conference(conf: str, x_map: Dict[str, int], order: List[int]) -> None:
+        def render_conference(
+            conf: str,
+            x_map: Dict[str, int],
+            order: List[int],
+            r1_pairs: List[Tuple[int, int]],
+        ) -> None:
             seed_map = spec.seed_map[conf]
             seed_to_y = {seed: Y_R1[i] for i, seed in enumerate(order)}
 
@@ -360,7 +374,6 @@ class PlayoffSimulator:
                 add_node(x_map["R1"], seed_to_y[seed], tid, label, hover)
 
             # R1 matchup pairs & edges to R2 slot.
-            r1_pairs = [(1, 8), (4, 5), (3, 6), (2, 7)]
             for i, (hi, lo) in enumerate(r1_pairs):
                 y_r2 = Y_R2[i]
                 add_edge(x_map["R1"], seed_to_y[hi], x_map["R2"], y_r2)
@@ -421,8 +434,8 @@ class PlayoffSimulator:
             )
             add_node(x_map["F"], Y_F[0], slot_team, label, f"{conf} Finals<br>{hover_cands}")
 
-        render_conference("West", X_WEST, west_order)
-        render_conference("East", X_EAST, east_order)
+        render_conference("West", X_WEST, west_order, west_r1_pairs)
+        render_conference("East", X_EAST, east_order, east_r1_pairs)
 
         # Central championship node.
         add_edge(X_WEST["F"], Y_F[0], X_CHAMP, Y_F[0])

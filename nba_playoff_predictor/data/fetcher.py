@@ -234,6 +234,72 @@ def _fetch_playoff_game_log(season: str) -> pd.DataFrame:
     return raw.get_data_frames()[0]
 
 
+def _season_id_regular(season: str) -> str:
+    """Convert a season string like ``'2025-26'`` to an NBA stats ``SeasonID``.
+
+    The stats API expects ``"2" + start_year`` for the regular season
+    (e.g. ``"22025"`` for 2025-26).
+    """
+    return "2" + season.split("-")[0]
+
+
+@_memory.cache
+def _fetch_playoff_picture(season: str) -> Dict[str, pd.DataFrame]:
+    """Fetch the authoritative playoff bracket via ``PlayoffPicture``.
+
+    Returns a dict of four DataFrames — matchups and standings for both
+    conferences — with the play-in results already applied to the 7/8 seeds.
+    """
+    from nba_api.stats.endpoints import PlayoffPicture
+
+    logger.info("Fetching PlayoffPicture for %s...", season)
+    pp = _retry_with_backoff(PlayoffPicture, season_id=_season_id_regular(season))
+    frames = pp.get_data_frames()
+
+    # The live API does not return frames in the order the nba_api library's
+    # `expected_data` declares. Classify each frame by its columns + CONFERENCE
+    # value so downstream code is order-independent.
+    result: Dict[str, pd.DataFrame] = {}
+    for df in frames:
+        cols = set(df.columns)
+        if "HIGH_SEED_RANK" in cols and "CONFERENCE" in cols:
+            conf = str(df["CONFERENCE"].iloc[0]) if not df.empty else None
+            key = "east_matchups" if conf == "East" else "west_matchups"
+            result[key] = df
+        elif "RANK" in cols and "TEAM_ID" in cols and "CONFERENCE" in cols:
+            conf = str(df["CONFERENCE"].iloc[0]) if not df.empty else None
+            key = "east_standings" if conf == "East" else "west_standings"
+            result[key] = df
+    return result
+
+
+def _parse_playoff_picture(
+    pp: Dict[str, pd.DataFrame],
+) -> Tuple[Dict[str, Dict[int, str]], Dict[str, List[Tuple[int, int]]]]:
+    """Return ``(seed_map, round1_pairs)`` extracted from a PlayoffPicture dict."""
+    seed_map: Dict[str, Dict[int, str]] = {"East": {}, "West": {}}
+    pairs: Dict[str, List[Tuple[int, int]]] = {"East": [], "West": []}
+    for conf, key in (("East", "east_matchups"), ("West", "west_matchups")):
+        df = pp.get(key)
+        if df is None or df.empty:
+            raise RuntimeError(f"Empty {conf} PlayoffPicture matchups")
+        for _, row in df.iterrows():
+            hi = int(row["HIGH_SEED_RANK"])
+            lo = int(row["LOW_SEED_RANK"])
+            hi_id = int(row["HIGH_SEED_TEAM_ID"])
+            lo_id = int(row["LOW_SEED_TEAM_ID"])
+            hi_abbr = FULL_NBA_TEAM_ID_MAP.get(hi_id)
+            lo_abbr = FULL_NBA_TEAM_ID_MAP.get(lo_id)
+            if hi_abbr is None or lo_abbr is None:
+                raise RuntimeError(f"Unknown team id in {conf} matchup: {hi_id}, {lo_id}")
+            seed_map[conf][hi] = hi_abbr
+            seed_map[conf][lo] = lo_abbr
+            pairs[conf].append((hi, lo))
+        if sorted(seed_map[conf].keys()) != list(range(1, 9)):
+            raise RuntimeError(f"{conf} PlayoffPicture missing seeds: {seed_map[conf]}")
+    return seed_map, pairs
+
+
 # ---------------------------------------------------------------------------
 # Playoff team discovery
 # ---------------------------------------------------------------------------
@@ -278,22 +344,63 @@ def _discover_playoff_teams(
 # Per-season cache so multiple callers see the same bracket.
 _cached_seed_map: Optional[Dict[str, Dict[int, str]]] = None
 _cached_playoff_ids: Optional[Dict[int, str]] = None
+_cached_round1_pairs: Optional[Dict[str, List[Tuple[int, int]]]] = None
 _cached_season: Optional[str] = None
+
+
+def reset_seed_cache() -> None:
+    """Clear the in-memory seed/playoff-ids cache.
+
+    joblib's on-disk cache is cleared separately via :func:`clear_cache`. This
+    resets the process-local memo so a subsequent call re-fetches.
+    """
+    global _cached_seed_map, _cached_playoff_ids, _cached_round1_pairs, _cached_season
+    _cached_seed_map = None
+    _cached_playoff_ids = None
+    _cached_round1_pairs = None
+    _cached_season = None
 
 
 def _ensure_playoff_discovery(
     season: str,
     raw_stats: Optional[pd.DataFrame] = None,
 ) -> Tuple[Dict[int, str], Dict[str, Dict[int, str]]]:
-    """Return ``(playoff_ids, seed_map)``, fetching and caching if needed."""
-    global _cached_seed_map, _cached_playoff_ids, _cached_season
+    """Return ``(playoff_ids, seed_map)``, fetching and caching if needed.
+
+    Prefers the authoritative :class:`PlayoffPicture` endpoint (which reflects
+    play-in results and official tiebreakers). Falls back to W-rank from
+    ``LeagueDashTeamStats`` when the bracket endpoint is unavailable (e.g. prior
+    to the play-in concluding).
+    """
+    global _cached_seed_map, _cached_playoff_ids, _cached_round1_pairs, _cached_season
     if _cached_season == season and _cached_playoff_ids is not None:
         return _cached_playoff_ids, _cached_seed_map  # type: ignore[return-value]
-    if raw_stats is None:
-        raw_stats = _fetch_raw_team_stats(season)
-    playoff_ids, seed_map = _discover_playoff_teams(raw_stats)
+
+    seed_map: Optional[Dict[str, Dict[int, str]]] = None
+    pairs: Optional[Dict[str, List[Tuple[int, int]]]] = None
+    try:
+        pp = _fetch_playoff_picture(season)
+        seed_map, pairs = _parse_playoff_picture(pp)
+        logger.info("Playoff teams resolved via PlayoffPicture for %s", season)
+    except Exception as exc:
+        logger.warning("PlayoffPicture unavailable (%s); using W-rank fallback.", exc)
+
+    if seed_map is None:
+        if raw_stats is None:
+            raw_stats = _fetch_raw_team_stats(season)
+        _, seed_map = _discover_playoff_teams(raw_stats)
+
+    inverse_abbrev = {v: k for k, v in FULL_NBA_TEAM_ID_MAP.items()}
+    playoff_ids: Dict[int, str] = {}
+    for conf_seeds in seed_map.values():
+        for abbr in conf_seeds.values():
+            nba_id = inverse_abbrev.get(abbr)
+            if nba_id is not None:
+                playoff_ids[nba_id] = abbr
+
     _cached_playoff_ids = playoff_ids
     _cached_seed_map = seed_map
+    _cached_round1_pairs = pairs
     _cached_season = season
     return playoff_ids, seed_map
 
@@ -561,21 +668,44 @@ def clear_cache() -> None:
     logger.info("Cleared nba_api cache at %s", _CACHE_DIR)
 
 
-def get_playoff_seed_map(season: Optional[str] = None) -> Dict[str, Dict[int, str]]:
-    """Return ``{"East": {1: "ABB", ...}, "West": {...}}`` for the given season.
+def get_playoff_seed_map(
+    season: Optional[str] = None,
+    return_pairs: bool = False,
+):
+    """Return the seed map (and optional round-1 pairs) for *season*.
 
-    Falls back to :func:`fallback_data.get_seed_to_team_id` when live data
-    is unavailable.
+    Preference order:
+      1. Authoritative :class:`PlayoffPicture` endpoint (includes play-in).
+      2. Top-8 by regular-season wins from ``LeagueDashTeamStats``.
+      3. Hardcoded ``fallback_data`` bracket.
+
+    When *return_pairs* is ``True`` the return value is
+    ``(seed_map, pairs_or_None)``; otherwise just the ``seed_map``.
+    ``pairs`` is a ``{"East": [(high_seed, low_seed), ...], "West": [...]}``
+    dict taken from the authoritative source. It is ``None`` whenever the
+    bracket was derived rather than fetched.
     """
     if season is None:
         season = current_nba_season()
-    if not _nba_api_available():
-        return fallback_data.get_seed_to_team_id()
-    try:
-        _, seed_map = _ensure_playoff_discovery(season)
-        return seed_map
-    except Exception:
-        return fallback_data.get_seed_to_team_id()
+
+    seed_map: Optional[Dict[str, Dict[int, str]]] = None
+    pairs: Optional[Dict[str, List[Tuple[int, int]]]] = None
+
+    if _nba_api_available():
+        try:
+            _, seed_map = _ensure_playoff_discovery(season)
+            pairs = _cached_round1_pairs
+        except Exception as exc:
+            logger.warning("Live seed discovery failed (%s); using hardcoded.", exc)
+            seed_map = None
+
+    if seed_map is None:
+        seed_map = fallback_data.get_seed_to_team_id()
+        pairs = None
+
+    if return_pairs:
+        return seed_map, pairs
+    return seed_map
 
 
 # ---------------------------------------------------------------------------

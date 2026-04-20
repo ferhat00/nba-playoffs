@@ -209,3 +209,4 @@ __marimo__/
 /nba/Scripts
 /nba/etc
 nba/pyvenv.cfg
+.claude/scheduled_tasks.lock

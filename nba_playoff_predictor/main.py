@@ -52,7 +52,7 @@ def _set_seeds(seed: int = 42) -> None:
 
 
 def _build_bracket_spec(team_df: pd.DataFrame) -> BracketSpec:
-    seed_map = fetcher.get_playoff_seed_map()
+    seed_map, round1_pairs = fetcher.get_playoff_seed_map(return_pairs=True)
     id_to_name = dict(zip(team_df["team_id"], team_df["team_name"]))
     seeds_by_team = dict(zip(team_df["team_id"], team_df["seed"]))
     conf_by_team = dict(zip(team_df["team_id"], team_df["conference"]))
@@ -61,6 +61,7 @@ def _build_bracket_spec(team_df: pd.DataFrame) -> BracketSpec:
         team_id_to_name=id_to_name,
         seeds_by_team=seeds_by_team,
         conference_by_team=conf_by_team,
+        round1_pairs=round1_pairs,
     )
 
 
@@ -154,9 +155,19 @@ def main() -> None:
         action="store_true",
         help="Suppress INFO logging.",
     )
+    parser.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        help="Clear joblib + in-memory caches before fetching so PlayoffPicture is re-pulled.",
+    )
     args = parser.parse_args()
 
     _configure_logging(verbose=not args.quiet)
+
+    if args.refresh_cache:
+        fetcher.clear_cache()
+        fetcher.reset_seed_cache()
+        logging.getLogger(__name__).info("Caches cleared; fetches will hit the live API.")
 
     if args.quick:
         n_sims = 1_000
