@@ -1,0 +1,1 @@
+"""Bracket simulation + visualization."""
