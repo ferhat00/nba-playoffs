@@ -119,14 +119,29 @@ class XGBoostMatchupEngine:
         team_vectors: Optional[Dict[str, np.ndarray]] = None,
         n_synthetic: int = 2500,
     ) -> None:
-        """Fit the XGBoost classifier. Accepts real data or synthesizes from team_vectors."""
-        if historical_matchup_df is None or historical_matchup_df.empty:
-            if team_vectors is None:
-                raise ValueError("Supply either historical_matchup_df or team_vectors.")
-            logger.info("No historical matchup data supplied; generating %d synthetic samples", n_synthetic)
-            df = self._generate_synthetic_data(team_vectors, n_samples=n_synthetic)
-        else:
-            df = historical_matchup_df.copy()
+        """Fit the XGBoost classifier.
+
+        When both *historical_matchup_df* and *team_vectors* are supplied the
+        two sources are blended: historical data provides real playoff signal
+        while synthetic samples from current-season vectors anchor the model
+        to the present roster / rating landscape.
+        """
+        parts: list[pd.DataFrame] = []
+
+        if historical_matchup_df is not None and not historical_matchup_df.empty:
+            logger.info("Using %d historical matchup samples", len(historical_matchup_df))
+            parts.append(historical_matchup_df)
+
+        if team_vectors is not None:
+            # Generate fewer synthetic samples when we already have historical data.
+            n_syn = n_synthetic if not parts else max(500, n_synthetic // 2)
+            logger.info("Generating %d synthetic samples from current team vectors", n_syn)
+            parts.append(self._generate_synthetic_data(team_vectors, n_samples=n_syn))
+
+        if not parts:
+            raise ValueError("Supply either historical_matchup_df or team_vectors.")
+
+        df = pd.concat(parts, ignore_index=True)
 
         X = self._diff_features(df)
         y = df["team_a_won"].astype(int).to_numpy()

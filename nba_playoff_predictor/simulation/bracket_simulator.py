@@ -1,5 +1,5 @@
 """
-Monte Carlo simulation of the 2025 NBA Playoffs + plotly bracket visualization.
+Monte Carlo simulation of the NBA Playoffs + plotly bracket visualization.
 
 Design notes
 ------------
@@ -280,10 +280,14 @@ class PlayoffSimulator:
 
     # --- Visualization ----------------------------------------------------
 
-    def visualize(self, filename: str = "bracket_probabilities.html") -> str:
-        """Render a plotly bracket tree to `output/bracket_probabilities.html`."""
+    def visualize(self, filename: str = "bracket_probabilities.html", playoff_year: Optional[int] = None) -> str:
+        """Render a plotly bracket tree to ``output/bracket_probabilities.html``."""
         if self._results is None:
             raise RuntimeError("PlayoffSimulator.run must be called first.")
+
+        if playoff_year is None:
+            from nba_playoff_predictor.data.fetcher import current_playoff_year
+            playoff_year = current_playoff_year()
 
         import plotly.graph_objects as go
 
@@ -467,7 +471,7 @@ class PlayoffSimulator:
         )
 
         fig.update_layout(
-            title=f"2025 NBA Playoff Bracket — Championship Probabilities (favorite: {best_name} {champ_probs[best_name]*100:.1f}%)",
+            title=f"{playoff_year} NBA Playoff Bracket \u2014 Championship Probabilities (favorite: {best_name} {champ_probs[best_name]*100:.1f}%)",
             plot_bgcolor="rgb(245,245,245)",
             paper_bgcolor="white",
             xaxis=dict(visible=False, range=[-5, 5]),
