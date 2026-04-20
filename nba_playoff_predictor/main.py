@@ -109,7 +109,7 @@ def run(n_simulations: int, mcmc_samples: int) -> None:
     # 4. Matchup predictor.
     log.info("Step 4/6: training XGBoostMatchupEngine")
     engine = XGBoostMatchupEngine(n_estimators=300, max_depth=4, learning_rate=0.05, random_seed=42)
-    engine.train(historical_matchup_df=None, team_vectors=aggregator.all_vectors(), n_synthetic=2500)
+    engine.train(historical_matchup_df=None, team_vectors=aggregator.all_vectors(), n_synthetic=5000)
     if engine.holdout_auc is not None:
         log.info("Matchup engine holdout AUC: %.4f", engine.holdout_auc)
 

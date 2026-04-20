@@ -52,6 +52,11 @@ class TeamSeasonLine:
     pace: float
     w: int
     l: int
+    three_pt_pct: float
+    opp_three_pt_pct: float
+    ast_to_tov: float
+    oreb_pct: float
+    clutch_net_rtg: float
 
     @property
     def net_rtg(self) -> float:
@@ -59,24 +64,24 @@ class TeamSeasonLine:
 
 
 TEAM_LINES: List[TeamSeasonLine] = [
-    # East
-    TeamSeasonLine("CLE", "Cleveland Cavaliers", 1, "East", 121.0, 112.0, 99.0, 64, 18),
-    TeamSeasonLine("BOS", "Boston Celtics", 2, "East", 119.5, 112.0, 99.1, 61, 21),
-    TeamSeasonLine("NYK", "New York Knicks", 3, "East", 117.0, 111.5, 97.5, 51, 31),
-    TeamSeasonLine("IND", "Indiana Pacers", 4, "East", 115.0, 114.0, 103.0, 50, 32),
-    TeamSeasonLine("MIL", "Milwaukee Bucks", 5, "East", 116.0, 114.0, 98.0, 48, 34),
-    TeamSeasonLine("DET", "Detroit Pistons", 6, "East", 112.5, 112.0, 99.0, 44, 38),
-    TeamSeasonLine("ATL", "Atlanta Hawks", 7, "East", 113.0, 114.5, 101.0, 40, 42),
-    TeamSeasonLine("MIA", "Miami Heat", 8, "East", 112.0, 113.0, 97.0, 37, 45),
+    # East — (id, name, seed, conf, off, def, pace, w, l, 3p%, opp3p%, ast/to, oreb%, clutch_net)
+    TeamSeasonLine("CLE", "Cleveland Cavaliers", 1, "East", 121.0, 112.0, 99.0, 64, 18, 38.5, 34.0, 1.95, 27.5, 8.5),
+    TeamSeasonLine("BOS", "Boston Celtics", 2, "East", 119.5, 112.0, 99.1, 61, 21, 38.0, 34.5, 1.90, 25.0, 6.0),
+    TeamSeasonLine("NYK", "New York Knicks", 3, "East", 117.0, 111.5, 97.5, 51, 31, 36.5, 35.0, 1.75, 28.5, 4.5),
+    TeamSeasonLine("IND", "Indiana Pacers", 4, "East", 115.0, 114.0, 103.0, 50, 32, 37.0, 36.0, 1.80, 26.0, 2.0),
+    TeamSeasonLine("MIL", "Milwaukee Bucks", 5, "East", 116.0, 114.0, 98.0, 48, 34, 36.0, 35.5, 1.70, 26.5, 3.0),
+    TeamSeasonLine("DET", "Detroit Pistons", 6, "East", 112.5, 112.0, 99.0, 44, 38, 35.0, 35.0, 1.60, 27.0, 1.0),
+    TeamSeasonLine("ATL", "Atlanta Hawks", 7, "East", 113.0, 114.5, 101.0, 40, 42, 35.5, 36.5, 1.65, 25.5, -1.5),
+    TeamSeasonLine("MIA", "Miami Heat", 8, "East", 112.0, 113.0, 97.0, 37, 45, 35.0, 35.5, 1.55, 26.0, -0.5),
     # West
-    TeamSeasonLine("OKC", "Oklahoma City Thunder", 1, "West", 119.0, 106.5, 99.0, 68, 14),
-    TeamSeasonLine("HOU", "Houston Rockets", 2, "West", 115.0, 110.5, 99.5, 52, 30),
-    TeamSeasonLine("LAL", "Los Angeles Lakers", 3, "West", 115.5, 112.0, 99.0, 50, 32),
-    TeamSeasonLine("DEN", "Denver Nuggets", 4, "West", 118.0, 114.5, 99.5, 50, 32),
-    TeamSeasonLine("LAC", "LA Clippers", 5, "West", 114.0, 111.0, 98.0, 50, 32),
-    TeamSeasonLine("GSW", "Golden State Warriors", 6, "West", 115.0, 112.5, 100.5, 48, 34),
-    TeamSeasonLine("MEM", "Memphis Grizzlies", 7, "West", 115.5, 113.0, 101.5, 48, 34),
-    TeamSeasonLine("DAL", "Dallas Mavericks", 8, "West", 114.0, 113.5, 98.5, 39, 43),
+    TeamSeasonLine("OKC", "Oklahoma City Thunder", 1, "West", 119.0, 106.5, 99.0, 68, 14, 37.5, 33.0, 2.00, 29.0, 10.0),
+    TeamSeasonLine("HOU", "Houston Rockets", 2, "West", 115.0, 110.5, 99.5, 52, 30, 35.5, 34.5, 1.75, 28.0, 3.5),
+    TeamSeasonLine("LAL", "Los Angeles Lakers", 3, "West", 115.5, 112.0, 99.0, 50, 32, 36.0, 35.0, 1.80, 26.5, 4.0),
+    TeamSeasonLine("DEN", "Denver Nuggets", 4, "West", 118.0, 114.5, 99.5, 50, 32, 37.0, 35.5, 1.85, 27.0, 5.5),
+    TeamSeasonLine("LAC", "LA Clippers", 5, "West", 114.0, 111.0, 98.0, 50, 32, 36.5, 34.5, 1.70, 25.5, 2.0),
+    TeamSeasonLine("GSW", "Golden State Warriors", 6, "West", 115.0, 112.5, 100.5, 48, 34, 37.5, 35.0, 1.85, 25.0, 3.0),
+    TeamSeasonLine("MEM", "Memphis Grizzlies", 7, "West", 115.5, 113.0, 101.5, 48, 34, 35.0, 35.5, 1.65, 28.0, 1.5),
+    TeamSeasonLine("DAL", "Dallas Mavericks", 8, "West", 114.0, 113.5, 98.5, 39, 43, 36.0, 36.0, 1.60, 26.0, -1.0),
 ]
 
 
@@ -170,7 +175,8 @@ def _synthesize_game_log(line: TeamSeasonLine, rng: np.random.Generator, n: int 
         home = bool(rng.random() < 0.5)
         if home:
             margin += 3.0
-        won = margin + rng.normal(0, 5.5) > 0
+        final_margin = margin + rng.normal(0, 5.5)
+        won = final_margin > 0
         games.append(
             {
                 "game_idx": i,
@@ -179,6 +185,7 @@ def _synthesize_game_log(line: TeamSeasonLine, rng: np.random.Generator, n: int 
                 "pace": pc,
                 "home": home,
                 "won": bool(won),
+                "margin": round(float(final_margin), 1),
             }
         )
     return games
@@ -201,6 +208,11 @@ def build_team_stats_df(seed: int = 42) -> pd.DataFrame:
                 "net_rtg": line.net_rtg,
                 "w": line.w,
                 "l": line.l,
+                "three_pt_pct": line.three_pt_pct,
+                "opp_three_pt_pct": line.opp_three_pt_pct,
+                "ast_to_tov": line.ast_to_tov,
+                "oreb_pct": line.oreb_pct,
+                "clutch_net_rtg": line.clutch_net_rtg,
                 "last20_game_log": _synthesize_game_log(line, rng),
             }
         )

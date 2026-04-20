@@ -1,15 +1,28 @@
 """
-TeamStateAggregator: collapses team stats + player impacts into an 8-dim vector.
+TeamStateAggregator: collapses team stats + player impacts into a 21-dim vector.
 
 Vector layout:
-    [0] elo_rating              — initialized from net_rtg
-    [1] injury_adjusted_elo     — elo minus 50 pts per injured top-5 impact player
-    [2] lstm_momentum           — tanh-activated final hidden state mean
-    [3] off_rtg_norm            — z-scored offensive rating
-    [4] def_rtg_norm            — z-scored defensive rating (sign-flipped: higher = better)
-    [5] pace_norm               — z-scored pace
-    [6] top3_player_impact      — mean composite impact of top-3 players
-    [7] depth_score             — mean composite impact of players 4..N
+    [0]  elo_rating              — initialized from net_rtg
+    [1]  injury_adjusted_elo     — elo minus 50 pts per injured top-5 impact player
+    [2]  lstm_momentum           — tanh-activated final hidden state mean
+    [3]  off_rtg_norm            — z-scored offensive rating
+    [4]  def_rtg_norm            — z-scored defensive rating (sign-flipped: higher = better)
+    [5]  pace_norm               — z-scored pace
+    [6]  top3_player_impact      — mean composite impact of top-3 players
+    [7]  depth_score             — mean composite impact of players 4..N
+    [8]  pythagorean_win_pct     — pythagorean expectation from off_rtg / def_rtg
+    [9]  overperformance         — actual win% minus pythagorean (regression signal)
+    [10] net_rtg_volatility      — std of game-level net rating over last 20
+    [11] off_rtg_trend           — OLS slope of off_rtg over last 20 games
+    [12] close_game_win_rate     — win% in games with |margin| <= 5
+    [13] home_win_pct            — home-game win% from last 20
+    [14] best_player_impact      — max composite impact on the roster
+    [15] star_concentration      — Herfindahl index of composite impacts
+    [16] roster_healthy_pct      — fraction of total composite impact that is healthy
+    [17] three_pt_pct_norm       — z-scored team 3-point %
+    [18] ast_to_tov_norm         — z-scored assist-to-turnover ratio
+    [19] oreb_pct_norm           — z-scored offensive rebound rate
+    [20] clutch_net_rtg_norm     — z-scored clutch-time net rating
 """
 
 from __future__ import annotations
@@ -57,9 +70,9 @@ class _LSTMMomentum(nn.Module if _TORCH_AVAILABLE else object):  # type: ignore
 
 
 class TeamStateAggregator:
-    """Builds an 8-dimensional state vector per playoff team."""
+    """Builds a 21-dimensional state vector per playoff team."""
 
-    VECTOR_DIM: int = 8
+    VECTOR_DIM: int = 21
 
     def __init__(self, lstm_epochs: int = 15, lstm_lr: float = 1e-2, random_seed: int = 42) -> None:
         self.lstm_epochs = int(lstm_epochs)
@@ -196,8 +209,96 @@ class TeamStateAggregator:
         depth = float(rest["composite_impact"].mean()) if len(rest) else 0.0
         return top3, depth
 
+    @staticmethod
+    def _best_player_impact(team_id: str, player_impact_df: pd.DataFrame) -> float:
+        players = player_impact_df[player_impact_df["team_id"] == team_id]
+        if players.empty:
+            return 0.0
+        return float(players["composite_impact"].max())
+
+    @staticmethod
+    def _star_concentration(team_id: str, player_impact_df: pd.DataFrame) -> float:
+        """Herfindahl index of composite impacts (higher = more top-heavy)."""
+        players = player_impact_df[player_impact_df["team_id"] == team_id]
+        if players.empty or len(players) < 2:
+            return 1.0
+        impacts = players["composite_impact"].to_numpy(dtype=float)
+        # Shift to positive domain for HHI (add offset so all > 0).
+        shifted = impacts - impacts.min() + 1e-6
+        shares = shifted / shifted.sum()
+        return float(np.sum(shares**2))
+
+    @staticmethod
+    def _roster_healthy_pct(team_id: str, player_impact_df: pd.DataFrame, raw_player_df: pd.DataFrame) -> float:
+        """Fraction of total composite impact available (not injured)."""
+        team_impact = player_impact_df[player_impact_df["team_id"] == team_id]
+        if team_impact.empty:
+            return 1.0
+        injured_ids = set(
+            raw_player_df.loc[raw_player_df["injured"] == True, "player_id"].astype(str).tolist()
+        )
+        total = float(team_impact["composite_impact"].abs().sum()) + 1e-9
+        healthy_mask = ~team_impact["player_id"].astype(str).isin(injured_ids)
+        healthy_total = float(team_impact.loc[healthy_mask, "composite_impact"].abs().sum())
+        return healthy_total / total
+
+    @staticmethod
+    def _pythagorean_win_pct(off_rtg: float, def_rtg: float) -> float:
+        """Pythagorean expectation using Hollinger exponent (16.5)."""
+        exp = 16.5
+        off_p = max(off_rtg, 1.0) ** exp
+        def_p = max(def_rtg, 1.0) ** exp
+        return off_p / (off_p + def_p)
+
+    @staticmethod
+    def _game_log_features(games: list) -> dict:
+        """Extract features from a team's last-20 game log."""
+        out = {
+            "net_rtg_volatility": 0.0,
+            "off_rtg_trend": 0.0,
+            "close_game_win_rate": 0.5,
+            "home_win_pct": 0.5,
+        }
+        if not games or len(games) < 5:
+            return out
+
+        net_rtgs = np.array([g["off_rtg"] - g["def_rtg"] for g in games], dtype=float)
+        off_rtgs = np.array([g["off_rtg"] for g in games], dtype=float)
+
+        # Volatility: std of game-level net rating
+        out["net_rtg_volatility"] = float(np.std(net_rtgs))
+
+        # Trend: OLS slope of off_rtg over the game sequence
+        x = np.arange(len(off_rtgs), dtype=float)
+        x_centered = x - x.mean()
+        denom = float(np.sum(x_centered**2))
+        if denom > 1e-9:
+            out["off_rtg_trend"] = float(np.sum(x_centered * (off_rtgs - off_rtgs.mean())) / denom)
+
+        # Close-game win rate (|margin| <= 5)
+        close_games = [g for g in games if abs(g.get("margin", g["off_rtg"] - g["def_rtg"])) <= 5]
+        if close_games:
+            close_wins = sum(1 for g in close_games if g["won"])
+            out["close_game_win_rate"] = close_wins / len(close_games)
+
+        # Home win %
+        home_games = [g for g in games if g.get("home", False)]
+        if home_games:
+            home_wins = sum(1 for g in home_games if g["won"])
+            out["home_win_pct"] = home_wins / len(home_games)
+
+        return out
+
+    @staticmethod
+    def _zscore(arr: np.ndarray) -> np.ndarray:
+        mu = float(np.mean(arr))
+        sd = float(np.std(arr))
+        if sd < 1e-9:
+            return np.zeros_like(arr)
+        return (arr - mu) / sd
+
     def build(self, team_df: pd.DataFrame, player_impact_df: pd.DataFrame, raw_player_df: Optional[pd.DataFrame] = None) -> None:
-        """Compute and cache each team's 8-dim state vector."""
+        """Compute and cache each team's 21-dim state vector."""
         required = {"team_id", "off_rtg", "def_rtg", "pace", "net_rtg", "last20_game_log"}
         missing = required - set(team_df.columns)
         if missing:
@@ -209,12 +310,23 @@ class TeamStateAggregator:
         self._team_df = team_df.reset_index(drop=True).copy()
         self._impact_df = player_impact_df.copy()
 
+        # --- Z-scored season-level stats ---
         off = self._team_df["off_rtg"].to_numpy(dtype=float)
         de = self._team_df["def_rtg"].to_numpy(dtype=float)
         pa = self._team_df["pace"].to_numpy(dtype=float)
-        off_n = (off - off.mean()) / (off.std() + 1e-9)
-        def_n = -1.0 * (de - de.mean()) / (de.std() + 1e-9)  # flip: higher = better defense
-        pace_n = (pa - pa.mean()) / (pa.std() + 1e-9)
+        off_n = self._zscore(off)
+        def_n = -1.0 * self._zscore(de)  # flip: higher = better defense
+        pace_n = self._zscore(pa)
+
+        # New team-level stats (fallback-safe)
+        three_pt = self._team_df.get("three_pt_pct", pd.Series([35.5] * len(self._team_df))).to_numpy(dtype=float)
+        ast_tov = self._team_df.get("ast_to_tov", pd.Series([1.7] * len(self._team_df))).to_numpy(dtype=float)
+        oreb = self._team_df.get("oreb_pct", pd.Series([26.0] * len(self._team_df))).to_numpy(dtype=float)
+        clutch = self._team_df.get("clutch_net_rtg", pd.Series([0.0] * len(self._team_df))).to_numpy(dtype=float)
+        three_pt_n = self._zscore(three_pt)
+        ast_tov_n = self._zscore(ast_tov)
+        oreb_n = self._zscore(oreb)
+        clutch_n = self._zscore(clutch)
 
         momentum_map = self._fit_and_score_momentum(self._team_df)
 
@@ -225,24 +337,51 @@ class TeamStateAggregator:
             elo_adj = elo - pen
             momentum = float(momentum_map.get(team_id, 0.0))
             top3, depth = self._depth_scores(team_id, player_impact_df)
+            best_player = self._best_player_impact(team_id, player_impact_df)
+            star_conc = self._star_concentration(team_id, player_impact_df)
+            healthy_pct = self._roster_healthy_pct(team_id, player_impact_df, raw_player_df)
+
+            # Pythagorean win pct and overperformance
+            pyth_wpct = self._pythagorean_win_pct(row["off_rtg"], row["def_rtg"])
+            w = float(row.get("w", 41))
+            l = float(row.get("l", 41))
+            actual_wpct = w / max(w + l, 1.0)
+            overperf = actual_wpct - pyth_wpct
+
+            # Game-log-derived features
+            games = row["last20_game_log"] or []
+            gl_feats = self._game_log_features(games)
 
             vec = np.array(
                 [
-                    elo,
-                    elo_adj,
-                    momentum,
-                    float(off_n[i]),
-                    float(def_n[i]),
-                    float(pace_n[i]),
-                    top3,
-                    depth,
+                    elo,                            # [0]
+                    elo_adj,                        # [1]
+                    momentum,                       # [2]
+                    float(off_n[i]),                # [3]
+                    float(def_n[i]),                # [4]
+                    float(pace_n[i]),               # [5]
+                    top3,                           # [6]
+                    depth,                          # [7]
+                    pyth_wpct,                      # [8]
+                    overperf,                       # [9]
+                    gl_feats["net_rtg_volatility"], # [10]
+                    gl_feats["off_rtg_trend"],      # [11]
+                    gl_feats["close_game_win_rate"],# [12]
+                    gl_feats["home_win_pct"],       # [13]
+                    best_player,                    # [14]
+                    star_conc,                      # [15]
+                    healthy_pct,                    # [16]
+                    float(three_pt_n[i]),           # [17]
+                    float(ast_tov_n[i]),            # [18]
+                    float(oreb_n[i]),               # [19]
+                    float(clutch_n[i]),             # [20]
                 ],
                 dtype=float,
             )
             self._vectors[team_id] = vec
 
         self._built = True
-        logger.info("TeamStateAggregator built for %d teams", len(self._vectors))
+        logger.info("TeamStateAggregator built for %d teams (%d-dim vectors)", len(self._vectors), self.VECTOR_DIM)
 
     def get_team_vector(self, team_id: str) -> np.ndarray:
         if not self._built:

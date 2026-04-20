@@ -103,6 +103,35 @@ def _fetch_raw_team_stats() -> pd.DataFrame:
 
 
 @_memory.cache
+def _fetch_raw_team_base_stats() -> pd.DataFrame:
+    from nba_api.stats.endpoints import LeagueDashTeamStats
+
+    logger.info("Fetching LeagueDashTeamStats (base) for %s...", SEASON)
+    base = _retry_with_backoff(
+        LeagueDashTeamStats,
+        season=SEASON,
+        season_type_all_star=SEASON_TYPE,
+        measure_type_detailed_defense="Base",
+    )
+    base_df = base.get_data_frames()[0]
+    return base_df
+
+
+@_memory.cache
+def _fetch_raw_team_clutch_stats() -> pd.DataFrame:
+    from nba_api.stats.endpoints import LeagueDashTeamClutch
+
+    logger.info("Fetching LeagueDashTeamClutch for %s...", SEASON)
+    clutch = _retry_with_backoff(
+        LeagueDashTeamClutch,
+        season=SEASON,
+        season_type_all_star=SEASON_TYPE,
+    )
+    clutch_df = clutch.get_data_frames()[0]
+    return clutch_df
+
+
+@_memory.cache
 def _fetch_raw_player_stats() -> pd.DataFrame:
     from nba_api.stats.endpoints import LeagueDashPlayerStats
 
@@ -155,7 +184,8 @@ def _game_log_to_records(raw: pd.DataFrame, pace: float) -> List[dict]:
     records = []
     for i, row in enumerate(recent.itertuples(index=False)):
         pts_for = float(getattr(row, "PTS", np.nan))
-        pts_against = float(getattr(row, "PTS", np.nan)) - float(getattr(row, "PLUS_MINUS", 0.0))
+        plus_minus = float(getattr(row, "PLUS_MINUS", 0.0))
+        pts_against = pts_for - plus_minus
         poss_est = max(85.0, pace * 48.0 / 48.0)  # approximate possessions/game
         off_rtg = 100.0 * pts_for / poss_est if poss_est else np.nan
         def_rtg = 100.0 * pts_against / poss_est if poss_est else np.nan
@@ -170,6 +200,7 @@ def _game_log_to_records(raw: pd.DataFrame, pace: float) -> List[dict]:
                 "pace": pace,
                 "home": home,
                 "won": won,
+                "margin": round(plus_minus, 1),
             }
         )
     return records
@@ -207,6 +238,75 @@ def _normalize_team_frame(raw: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _merge_base_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """Merge base shooting / assist / rebound stats into the team frame."""
+    try:
+        raw = _fetch_raw_team_base_stats()
+        keep_ids = set(NBA_TEAM_ID_MAP.keys())
+        sub = raw[raw["TEAM_ID"].isin(keep_ids)].copy()
+        sub["team_id"] = sub["TEAM_ID"].map(NBA_TEAM_ID_MAP)
+
+        # 3P% — FG3_PCT is a 0-1 fraction; convert to percentage
+        fg3_pct = sub.set_index("team_id").get("FG3_PCT", pd.Series(dtype=float))
+        df["three_pt_pct"] = df["team_id"].map(fg3_pct).fillna(35.0) * 100.0
+        # Some endpoints already return as percentage; clamp to sensible range
+        df.loc[df["three_pt_pct"] > 100.0, "three_pt_pct"] = df["three_pt_pct"] / 100.0
+        df.loc[df["three_pt_pct"] < 1.0, "three_pt_pct"] = df["three_pt_pct"] * 100.0
+
+        # AST / TOV ratio
+        ast = sub.set_index("team_id").get("AST", pd.Series(dtype=float))
+        tov = sub.set_index("team_id").get("TOV", pd.Series(dtype=float))
+        ast_tov = (ast / tov.replace(0, np.nan)).fillna(1.5)
+        df["ast_to_tov"] = df["team_id"].map(ast_tov).fillna(1.5)
+
+        # OREB%
+        oreb = sub.set_index("team_id").get("OREB", pd.Series(dtype=float))
+        # Approximate oreb% as oreb / (oreb + opp_dreb); fallback to raw count percentile
+        df["oreb_pct"] = df["team_id"].map(oreb).fillna(10.0)
+        # Normalize to a ~25-30 range if raw counts (>50 means per-game, <50 means rate)
+        if df["oreb_pct"].mean() > 50:
+            df["oreb_pct"] = df["oreb_pct"].rank(pct=True) * 5.0 + 24.0
+
+        logger.info("Merged base team stats (3P%%, AST/TO, OREB)")
+    except Exception as exc:
+        logger.warning("Failed to fetch base team stats (%s); using defaults", exc)
+        df["three_pt_pct"] = 35.5
+        df["ast_to_tov"] = 1.7
+        df["oreb_pct"] = 26.0
+    return df
+
+
+def _merge_clutch_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """Merge clutch net rating into the team frame."""
+    try:
+        raw = _fetch_raw_team_clutch_stats()
+        keep_ids = set(NBA_TEAM_ID_MAP.keys())
+        sub = raw[raw["TEAM_ID"].isin(keep_ids)].copy()
+        sub["team_id"] = sub["TEAM_ID"].map(NBA_TEAM_ID_MAP)
+
+        # Clutch PLUS_MINUS per game as a proxy for clutch net rating
+        if "PLUS_MINUS" in sub.columns:
+            gp = sub.get("GP", pd.Series(dtype=float)).replace(0, 1)
+            clutch_net = (sub["PLUS_MINUS"] / gp).astype(float)
+            clutch_map = dict(zip(sub["team_id"], clutch_net))
+        elif "NET_RATING" in sub.columns:
+            clutch_map = dict(zip(sub["team_id"], sub["NET_RATING"].astype(float)))
+        else:
+            clutch_map = {}
+
+        df["clutch_net_rtg"] = df["team_id"].map(clutch_map).fillna(0.0)
+        # Opponent 3P% — not available from clutch endpoint; default from base or constant
+        if "opp_three_pt_pct" not in df.columns:
+            df["opp_three_pt_pct"] = 35.0
+        logger.info("Merged clutch stats")
+    except Exception as exc:
+        logger.warning("Failed to fetch clutch stats (%s); using defaults", exc)
+        df["clutch_net_rtg"] = 0.0
+        if "opp_three_pt_pct" not in df.columns:
+            df["opp_three_pt_pct"] = 35.0
+    return df
+
+
 def get_team_stats() -> pd.DataFrame:
     """
     Return a DataFrame of regular-season team statistics for the 16 playoff teams.
@@ -222,6 +322,11 @@ def get_team_stats() -> pd.DataFrame:
     try:
         raw = _fetch_raw_team_stats()
         df = _normalize_team_frame(raw)
+        df = _merge_base_stats(df)
+        df = _merge_clutch_stats(df)
+        # Opponent 3P% default (would need opponent shooting splits endpoint for real data)
+        if "opp_three_pt_pct" not in df.columns:
+            df["opp_three_pt_pct"] = 35.0
 
         logs: List[List[dict]] = []
         inverse = {v: k for k, v in NBA_TEAM_ID_MAP.items()}

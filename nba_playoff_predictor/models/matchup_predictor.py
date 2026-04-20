@@ -1,10 +1,11 @@
 """
 XGBoost classifier over team-vector differentials to predict single-game win prob.
 
-Feature vector per matchup = team_a_vector - team_b_vector (length 8).
-When real historical matchup data is not supplied, `train()` generates a
+Feature vector per matchup = team_a_vector - team_b_vector (length 21).
+When real historical matchup data is not supplied, ``train()`` generates a
 synthetic set by sampling from Normal distributions parameterized by each
-team's actual stats and labeling wins with a logistic of net_rtg differential.
+team's actual stats and labeling wins with a logistic of composite differentials
+including Elo, top-3 impact, momentum, clutch rating, and best-player impact.
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ class XGBoostMatchupEngine:
     def _generate_synthetic_data(
         self,
         team_vectors: Dict[str, np.ndarray],
-        n_samples: int = 2500,
+        n_samples: int = 5000,
     ) -> pd.DataFrame:
         rng = np.random.default_rng(self.random_seed)
         team_ids = list(team_vectors.keys())
@@ -67,7 +68,6 @@ class XGBoostMatchupEngine:
             raise ValueError("Need at least 2 teams to generate synthetic matchups.")
 
         rows = []
-        # Elo index 0, off_n index 3, def_n index 4 — proxy net rating differential.
         for _ in range(n_samples):
             a, b = rng.choice(team_ids, size=2, replace=False)
             va = team_vectors[a].copy()
@@ -77,11 +77,23 @@ class XGBoostMatchupEngine:
             va_obs = va + noise
             vb_obs = vb + rng.normal(0.0, 0.1, size=vb.shape)
 
-            # True win probability driven by injury-adjusted Elo differential.
+            # True win probability driven by multiple vector components.
+            # [1] injury-adjusted Elo, [2] momentum, [6] top3 impact,
+            # [14] best player, [20] clutch net rtg, [8] pythagorean wpct
             elo_diff = va[1] - vb[1]
             top3_diff = va[6] - vb[6]
             momentum_diff = va[2] - vb[2]
-            score = 0.012 * elo_diff + 0.6 * top3_diff + 0.3 * momentum_diff
+            best_player_diff = va[14] - vb[14]
+            clutch_diff = va[20] - vb[20]
+            pyth_diff = va[8] - vb[8]
+            score = (
+                0.008 * elo_diff
+                + 0.35 * top3_diff
+                + 0.15 * momentum_diff
+                + 0.20 * best_player_diff
+                + 0.15 * clutch_diff
+                + 1.5 * pyth_diff
+            )
             p_win = float(self._logistic(np.array([score]))[0])
             won = bool(rng.random() < p_win)
             rows.append(
