@@ -14,6 +14,7 @@ Public API:
     get_team_stats(season=None)      -> pd.DataFrame
     get_player_stats(season=None)    -> pd.DataFrame
     get_playoff_seed_map(season=None)-> dict
+    get_series_results(season=None)  -> dict  (balldontlie + ESPN fallback)
     get_historical_matchup_data()    -> pd.DataFrame
 """
 
@@ -706,6 +707,161 @@ def get_playoff_seed_map(
     if return_pairs:
         return seed_map, pairs
     return seed_map
+
+
+# ---------------------------------------------------------------------------
+# Playoff series results  (balldontlie + ESPN)
+# ---------------------------------------------------------------------------
+
+_ESPN_SCOREBOARD = (
+    "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+    "?seasontype=3&dates={date_range}&limit=900"
+)
+_BALLDONTLIE_GAMES = "https://api.balldontlie.io/v1/games"
+
+
+def _series_key(a: str, b: str) -> str:
+    return "_".join(sorted([a, b]))
+
+
+def _build_series_from_games(games: List[Dict]) -> Dict[str, Dict]:
+    """Aggregate a list of completed game dicts into series win records.
+
+    Each game dict must have keys: ``home_abbr``, ``away_abbr``, ``winner_abbr``.
+    """
+    series: Dict[str, Dict] = {}
+    for g in games:
+        home, away, winner = g["home_abbr"], g["away_abbr"], g["winner_abbr"]
+        key = _series_key(home, away)
+        if key not in series:
+            series[key] = {
+                "teams": tuple(sorted([home, away])),
+                "wins": {home: 0, away: 0},
+                "complete": False,
+                "winner": None,
+            }
+        series[key]["wins"][winner] = series[key]["wins"].get(winner, 0) + 1
+        if max(series[key]["wins"].values()) >= 4:
+            series[key]["complete"] = True
+            series[key]["winner"] = max(series[key]["wins"], key=lambda t: series[key]["wins"][t])
+    return series
+
+
+def _fetch_series_espn() -> Dict[str, Dict]:
+    """Return current playoff series records from the ESPN unofficial scoreboard API.
+
+    Covers the full April-June window of the current playoff year in one request.
+    No API key required.
+    """
+    import requests
+
+    year = current_playoff_year()
+    date_range = f"{year}0412-{year}0630"
+    url = _ESPN_SCOREBOARD.format(date_range=date_range)
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+
+    games: List[Dict] = []
+    for event in data.get("events", []):
+        comp = event.get("competitions", [{}])[0]
+        if not comp.get("status", {}).get("type", {}).get("completed", False):
+            continue
+        competitors = comp.get("competitors", [])
+        if len(competitors) != 2:
+            continue
+        abbrs = [c["team"]["abbreviation"] for c in competitors]
+        scores = [int(c.get("score", 0) or 0) for c in competitors]
+        winner = abbrs[0] if scores[0] > scores[1] else abbrs[1]
+        games.append({"home_abbr": abbrs[0], "away_abbr": abbrs[1], "winner_abbr": winner})
+
+    return _build_series_from_games(games)
+
+
+def _fetch_series_balldontlie() -> Dict[str, Dict]:
+    """Return current playoff series records from balldontlie.io v1 API.
+
+    Requires ``BALLDONTLIE_API_KEY`` env var (free-tier key from balldontlie.io).
+    Paginates via cursor until all playoff games for the season are collected.
+    """
+    import requests
+
+    api_key = os.environ.get("BALLDONTLIE_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    year = int(current_nba_season().split("-")[0])
+
+    games: List[Dict] = []
+    cursor: Optional[str] = None
+    while True:
+        params: list = [("postseason", "true"), ("per_page", 100), ("seasons[]", year)]
+        if cursor:
+            params.append(("cursor", cursor))
+        resp = requests.get(_BALLDONTLIE_GAMES, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        for game in data.get("data", []):
+            if str(game.get("status", "")).lower() != "final":
+                continue
+            home = game.get("home_team", {}).get("abbreviation", "")
+            away = game.get("visitor_team", {}).get("abbreviation", "")
+            home_score = int(game.get("home_team_score") or 0)
+            away_score = int(game.get("visitor_team_score") or 0)
+            if not home or not away or home_score == away_score:
+                continue
+            winner = home if home_score > away_score else away
+            games.append({"home_abbr": home, "away_abbr": away, "winner_abbr": winner})
+
+        cursor = data.get("meta", {}).get("next_cursor")
+        if not cursor:
+            break
+
+    return _build_series_from_games(games)
+
+
+def get_series_results(season: Optional[str] = None) -> Dict[str, Dict]:
+    """Return current playoff series win records.
+
+    Tries sources in priority order:
+      1. balldontlie.io   — if ``BALLDONTLIE_API_KEY`` env var is set.
+      2. ESPN unofficial  — keyless, no registration required.
+
+    Returns a dict keyed by sorted team-abbreviation pair, e.g.::
+
+        {
+            "BOS_NYK": {
+                "teams": ("BOS", "NYK"),
+                "wins": {"BOS": 3, "NYK": 1},
+                "complete": False,
+                "winner": None,
+            },
+            ...
+        }
+
+    Returns an empty dict when all sources fail.
+    """
+    if season is not None:
+        pass  # season param reserved for future use; sources auto-detect current year
+
+    if os.environ.get("BALLDONTLIE_API_KEY"):
+        try:
+            series = _fetch_series_balldontlie()
+            if series:
+                logger.info("Series results from balldontlie.io (%d series)", len(series))
+                return series
+        except Exception as exc:
+            logger.warning("balldontlie series fetch failed: %s", exc)
+
+    try:
+        series = _fetch_series_espn()
+        if series:
+            logger.info("Series results from ESPN (%d series)", len(series))
+            return series
+    except Exception as exc:
+        logger.warning("ESPN series fetch failed: %s", exc)
+
+    logger.warning("All series result sources failed; returning empty.")
+    return {}
 
 
 # ---------------------------------------------------------------------------
