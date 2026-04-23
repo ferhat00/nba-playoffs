@@ -210,3 +210,5 @@ __marimo__/
 /nba/etc
 nba/pyvenv.cfg
 .claude/scheduled_tasks.lock
+config.yaml
+config.yaml
