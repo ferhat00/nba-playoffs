@@ -1,0 +1,23 @@
+# NBA Playoff Predictor — Kaggle runtime config
+# -----------------------------------------------
+# 1. Fill in any optional credentials below.
+# 2. Upload this file as a PRIVATE Kaggle dataset:
+#      https://www.kaggle.com/datasets/new
+#      Name the dataset "nba-playoffs" (slug: nba-playoffs)
+#      Upload only this file and set visibility to Private.
+# 3. In the Kaggle notebook: Add Data → search your dataset → Add.
+#    The file will be available at /kaggle/input/nba-playoffs/config.yaml
+
+# --- API credentials (all optional) --------------------------------
+# balldontlie.io free key — sign up at https://www.balldontlie.io/
+# Enables live playoff-series results for bracket-state features.
+# Leave blank ("") to use the keyless ESPN fallback instead.
+balldontlie_api_key: ""
+
+# --- Pipeline parameters --------------------------------------------
+# quick_mode: true  →  1 000 sims / 100 MCMC draws  (smoke test, <60 s)
+# quick_mode: false →  100 000 sims / 500 MCMC draws (full production run)
+quick_mode: false
+n_simulations: 100000
+mcmc_samples: 500
+random_seed: 42
